@@ -67,6 +67,7 @@ from .policy import (
     fallback_action,
 )
 from .pricing import quote_prices
+from .risk import kill_check
 from .state import InventoryState, build_snapshot, record_fill_slippage, update_vwap
 
 LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path.home() / ".jev-loop")))
@@ -203,6 +204,16 @@ def run(
             except AlpacaAPIError as exc:
                 api_error_streak += 1
                 print(f"tick {block} | alpaca error: {exc}")
+                # The streak is reset to 0 on the success path just above and
+                # this branch used to `continue`, so no risk check ever saw a
+                # non-zero streak: max_api_errors was unreachable. Check it
+                # here, where the streak actually lives.
+                if api_error_streak > limits.max_api_errors:
+                    print(
+                        f"tick {block} | KILL: {api_error_streak} consecutive Alpaca "
+                        f"errors, over max_api_errors ({limits.max_api_errors}). Stopping."
+                    )
+                    break
                 _sleep_remaining(tick_start, limits.tick_seconds)
                 n += 1
                 continue
@@ -298,9 +309,13 @@ def run(
             execution_health_score = (
                 answers["execution_health"]["score"] if answers else None
             )
-            risk_kill_pre = snapshot["drawdown_pct"] > limits.max_drawdown_pct
+            # Every kill-class limit, not just drawdown, has to reach the
+            # ladder: a kill first seen inside _execute_action() lands in the
+            # display string and nowhere else, so the loop would refuse each
+            # order forever instead of flattening and stopping.
+            kill_verdict = kill_check(snapshot, limits, api_error_streak)
             rung = select_rung(
-                risk_kill=risk_kill_pre,
+                risk_kill=not kill_verdict.ok,
                 decision_late=decision_late,
                 jev_down=jev_down and not decision_late,
                 decision_confidence=decision_conf,
@@ -318,7 +333,10 @@ def run(
             if rung == Rung.HOLD_LATE or action is None:
                 line_action = "HOLD (late)"
             elif rung == Rung.KILL or (action and action.kind == KILL):
-                line_action = "KILL (flatten)"
+                kill_reason = kill_verdict.veto or (
+                    action.reason if action else "hard limit breached"
+                )
+                line_action = f"KILL (flatten): {kill_reason}"
                 resting_quotes = None
                 inv.inventory = 0.0
             else:
