@@ -79,6 +79,11 @@ class InventoryState:
     vwap_cum_pv: float = 0.0
     vwap_cum_vol: float = 0.0
     vwap_last_trade_ts: float = 0.0
+    # Set when something happened that makes the local inventory number
+    # suspect (a fill, or a close that could not be verified), so the loop
+    # re-reads the broker's position on the next tick rather than waiting
+    # for the periodic sync.
+    needs_position_sync: bool = False
 
 
 def update_vwap(inv: InventoryState, trades: list[tuple[float, float, float]]) -> None:
@@ -109,6 +114,47 @@ def record_fill_slippage(
     bps = sign * (fill_price - expected_price) / expected_price * 10_000
     inv.recent_slippage_bps.append(round(bps, 2))
     inv.recent_slippage_bps = inv.recent_slippage_bps[-10:]
+
+
+def reconcile_position(
+    inv: InventoryState, position: dict | None, as_of: float
+) -> tuple[float, float]:
+    """Overwrite the loop's own inventory bookkeeping with the broker's.
+
+    The loop only ever adjusted `inventory` when it submitted a
+    directional market order, so a resting quote that filled was
+    invisible to it and a restart began by assuming flat. Both make
+    `max_position_usd` a limit on a number the loop made up rather than
+    on the position actually held. This is the correction: Alpaca's
+    answer wins, always.
+
+    `position` is Alpaca's position payload, or None when flat. Returns
+    (previous_inventory, new_inventory) so the caller can report a
+    correction rather than silently swallowing one.
+    """
+    previous = inv.inventory
+
+    if not position:
+        inv.inventory = 0.0
+        inv.position_opened_at = None
+        return previous, 0.0
+
+    qty = float(position.get("qty", 0.0))
+    inv.inventory = qty
+    entry = position.get("avg_entry_price")
+    if entry is not None:
+        inv.entry_price = float(entry)
+
+    if qty == 0:
+        inv.position_opened_at = None
+    elif previous == 0 or inv.position_opened_at is None:
+        # First sight of this position. Alpaca does not report when it was
+        # opened, so age is measured from now: on a restart into an
+        # existing position, max_inventory_age_s is therefore generous by
+        # however long it was already held. Documented, not silent.
+        inv.position_opened_at = as_of
+
+    return previous, inv.inventory
 
 
 def build_snapshot(

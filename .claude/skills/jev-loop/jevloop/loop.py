@@ -68,7 +68,13 @@ from .policy import (
 )
 from .pricing import quote_prices
 from .risk import kill_check
-from .state import InventoryState, build_snapshot, record_fill_slippage, update_vwap
+from .state import (
+    InventoryState,
+    build_snapshot,
+    reconcile_position,
+    record_fill_slippage,
+    update_vwap,
+)
 
 LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path.home() / ".jev-loop")))
 LOG_FILE = LOG_DIR / "log.jsonl"
@@ -142,6 +148,12 @@ def run(
         )
 
     inv = InventoryState(equity_usd=0.0, high_water_mark_usd=0.0)
+    # Start from the broker's position, not from an assumption of flat: a
+    # restart into an existing position would otherwise compute every risk
+    # limit from zero and happily double up on it.
+    if not dry_execution:
+        print(_sync_position(alpaca, inv, time.time(), where="startup"))
+    needs_position_sync = False
     api_error_streak = 0
     jev_down = False
     rest_counter = 0
@@ -217,6 +229,21 @@ def run(
                 _sleep_remaining(tick_start, limits.tick_seconds)
                 n += 1
                 continue
+
+            # Re-read the broker's position periodically, and always right
+            # after a fill. Quote fills are invisible to this loop
+            # otherwise, so without this the inventory it polices is its
+            # own guess rather than the position it actually holds.
+            if not dry_execution and (
+                needs_position_sync or block % limits.position_sync_ticks == 1
+            ):
+                try:
+                    note = _sync_position(alpaca, inv, now, where=f"tick {block}")
+                    needs_position_sync = False
+                    if note:
+                        print(note)
+                except AlpacaAPIError as exc:
+                    print(f"tick {block} | position sync failed: {exc}")
 
             mid = (
                 (bids[0][0] + asks[0][0]) / 2
@@ -336,9 +363,14 @@ def run(
                 kill_reason = kill_verdict.veto or (
                     action.reason if action else "hard limit breached"
                 )
-                line_action = f"KILL (flatten): {kill_reason}"
+                line_action = f"KILL: {kill_reason}"
                 resting_quotes = None
-                inv.inventory = 0.0
+                # Used to set inv.inventory = 0.0 and send nothing: the loop
+                # believed it was flat while the broker still held the
+                # position. Close it for real, and only believe it once the
+                # venue confirms.
+                flat_note = _flatten(alpaca, inv, now, dry=dry_execution)
+                line_action = f"{line_action} | {flat_note}"
             else:
                 # 7. risk veto happens inside execute_action via risk.check
                 (
@@ -367,6 +399,10 @@ def run(
                     now=now,
                     dry=dry_execution,
                 )
+
+            if inv.needs_position_sync:
+                needs_position_sync = True
+                inv.needs_position_sync = False
 
             # 9. log
             record = {
@@ -460,6 +496,68 @@ def run(
     finally:
         if previous_sigterm_handler is not None:
             signal.signal(signal.SIGTERM, previous_sigterm_handler)
+
+
+def _sync_position(alpaca, inv, as_of: float, where: str) -> str:
+    """Overwrite local inventory with the broker's, and say so when the two
+    disagreed. Returns a line to print, or "" when nothing moved."""
+    position = alpaca.get_position()
+    before, after = reconcile_position(inv, position, as_of)
+    if before == after:
+        return (
+            f"position sync ({where}): flat, as expected"
+            if where == "startup" and after == 0
+            else ""
+        )
+    return (
+        f"position sync ({where}): local inventory {before:g} corrected to "
+        f"{after:g} from the broker"
+    )
+
+
+def _flatten(alpaca, inv, as_of: float, dry: bool = False) -> str:
+    """Cancel resting orders and close the position at market, then verify.
+
+    Never reports flat on faith. If the close fails, or the venue still
+    shows a position afterwards, the loop says so and leaves the inventory
+    number alone: a KILL that could not flatten is worth knowing about,
+    and pretending otherwise is how a real position gets forgotten.
+    """
+    if dry:
+        return "dry: would cancel orders and close the position"
+
+    notes = []
+    try:
+        alpaca.cancel_all_orders()
+    except AlpacaAPIError as exc:
+        notes.append(f"cancel failed: {exc}")
+
+    try:
+        closing = alpaca.close_position()
+        if closing is None:
+            notes.append("nothing to close")
+        else:
+            notes.append("close submitted")
+    except MarketClosedError as exc:
+        inv.needs_position_sync = True
+        return f"FLATTEN FAILED ({exc}); position may still be open"
+    except AlpacaAPIError as exc:
+        inv.needs_position_sync = True
+        return f"FLATTEN FAILED ({exc}); position may still be open"
+
+    # Verify, rather than assume.
+    try:
+        position = alpaca.get_position()
+    except AlpacaAPIError as exc:
+        inv.needs_position_sync = True
+        return f"{', '.join(notes)}; could not verify flat ({exc})"
+
+    reconcile_position(inv, position, as_of)
+    if inv.inventory:
+        return (
+            f"{', '.join(notes)}; STILL HOLDING {inv.inventory:g} after close"
+        )
+    return f"{', '.join(notes)}, confirmed flat"
 
 
 def _read_top_of_book(
@@ -653,6 +751,7 @@ def _execute_action(
                     fill_qty = leg_qty
                     fill_price = fill_px
                     fill_txt = f"filled {fill_qty} @ {fill_px:,.2f}"
+                    inv.needs_position_sync = True
                     line_action = f"{action.kind} skew {action.skew:+.1f} + {side} leg"
                 except MarketClosedError as exc:
                     fill_txt = f"leg skipped: {exc}"

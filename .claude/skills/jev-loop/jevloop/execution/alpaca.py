@@ -15,6 +15,7 @@ from __future__ import annotations
 import collections
 import os
 import time
+import urllib.parse
 
 try:
     import requests
@@ -255,6 +256,46 @@ class AlpacaPaperClient:
 
     def cancel_all_orders(self) -> None:
         self._request("DELETE", f"{self.base_url}/v2/orders")
+
+    # -- positions -----------------------------------------------
+    def _position_url(self) -> str:
+        """Alpaca addresses a position by symbol in the path, so a crypto
+        pair's slash has to be percent-encoded: BTC/USD -> BTC%2FUSD."""
+        return (
+            f"{self.base_url}/v2/positions/"
+            f"{urllib.parse.quote(self.symbol, safe='')}"
+        )
+
+    def get_position(self) -> dict | None:
+        """The broker's own view of the position, or None when flat.
+
+        Alpaca answers 404 for a symbol you hold nothing in, which is a
+        normal answer here rather than an error: it means flat.
+        """
+        try:
+            return self._request("GET", self._position_url())
+        except AlpacaAPIError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+
+    def close_position(self) -> dict | None:
+        """Liquidate the whole position at market. Returns the closing
+        order, or None if there was nothing to close.
+
+        This is what makes a KILL mean something at the venue instead of
+        only in the loop's own bookkeeping.
+        """
+        if not self.spec.is_24_7 and not self.is_market_open():
+            raise MarketClosedError(
+                f"{self.symbol} market is closed, cannot close the position now"
+            )
+        try:
+            return self._request("DELETE", self._position_url())
+        except AlpacaAPIError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
 
     # -- market data -----------------------------------------------
     def get_orderbook(self) -> dict:

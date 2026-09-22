@@ -17,6 +17,8 @@ from jevloop.limits import Limits
 from jevloop.policy import QUOTE_BOTH_SIDES, Action, compose_action
 from jevloop.strategy import THRESHOLDS, apply_strategy
 
+from fakes import FakeAlpaca, PressureAwareClient
+
 L = Limits()
 
 LONG = dict(inventory=0.5, drawdown_pct=0.0, mid=100.0)
@@ -135,81 +137,6 @@ def test_guard_is_reached_through_compose_action():
 # -- the payoff: the loop stops walking into its own risk cap -----------
 
 
-class _FakeAlpaca:
-    def __init__(self, spec):
-        self.spec = spec
-        self.symbol = spec.symbol
-        self.base_url = "https://paper-api.alpaca.markets"
-        self.is_live = False
-
-    def is_market_open(self):
-        return True
-
-    def get_orderbook(self):
-        return {
-            "b": [{"p": 100.0 - i, "s": 5.0} for i in range(3)],
-            "a": [{"p": 101.0 + i, "s": 5.0} for i in range(3)],
-        }
-
-    def get_latest_trade(self):
-        return {"p": 100.5, "s": 1.0}
-
-    def get_recent_trades(self, limit=100):
-        return [{"p": 100.5, "s": 0.1, "tks": "B"} for _ in range(30)]
-
-    def submit_limit_order(self, side, qty, limit_price, tif="gtc"):
-        return {"id": "x"}
-
-    def submit_market_order(self, side, qty):
-        return {"id": "x"}
-
-    def cancel_all_orders(self):
-        pass
-
-
-class _PressureAwareClient:
-    """Always calls "up" confidently -- the one-sided case that walks the
-    position into the cap -- but reports inventory_pressure honestly,
-    rising with the position, the way a calibrated model would."""
-
-    name = "STUB"
-    model = "stub-pressure-aware"
-
-    def __init__(self, max_position_usd):
-        self._cap = max_position_usd
-
-    def ask(self, state, questions, timeout):
-        position_usd = abs(state.get("inventory", 0.0)) * state.get("mid", 0.0)
-        pressure = min(3.0, 3.0 * position_usd / self._cap) if self._cap else 0.0
-        score = lambda v: {  # noqa: E731
-            "type": "score",
-            "score": v,
-            "legend": {"0": "a", "1": "b", "2": "c", "3": "d"},
-            "probabilities": {"0": 0.0, "1": 0.05, "2": 0.1, "3": 0.85},
-            "confidence": 0.95,
-        }
-        answers = {
-            "regime": {
-                "type": "choice",
-                "choice": "trending",
-                "probabilities": {"trending": 0.9, "mean_reverting": 0.1},
-                "confidence": 0.9,
-            },
-            "direction": {
-                "type": "choice",
-                "choice": "up",
-                "probabilities": {"up": 0.9, "down": 0.05, "neutral": 0.05},
-                "confidence": 0.9,
-            },
-            "toxic_flow": {"type": "noul", "noul": 0.1},
-            "liquidity_stressed": {"type": "noul", "noul": 0.1},
-            "quote_environment": score(2.8),
-            "inventory_pressure": score(pressure),
-            "execution_health": score(2.9),
-        }
-        return answers, {"route": self.name, "model": self.model, "latency_ms": 12.0}
-
-
 def test_loop_runs_its_full_budget_instead_of_killing_on_position(
     tmp_path, monkeypatch
 ):
@@ -230,7 +157,7 @@ def test_loop_runs_its_full_budget_instead_of_killing_on_position(
 
     spec = resolve_symbol("BTC/USD")
     monkeypatch.setattr(
-        loopmod, "client_from_env", lambda symbol, live, confirmation: _FakeAlpaca(spec)
+        loopmod, "client_from_env", lambda symbol, live, confirmation: FakeAlpaca(spec)
     )
 
     limits = Limits()
@@ -238,7 +165,7 @@ def test_loop_runs_its_full_budget_instead_of_killing_on_position(
     monkeypatch.setattr(
         loopmod,
         "resolve_decision_client",
-        lambda mock: _PressureAwareClient(limits.max_position_usd),
+        lambda mock: PressureAwareClient(limits.max_position_usd),
     )
 
     budget = 30

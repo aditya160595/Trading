@@ -13,6 +13,8 @@ from jevloop.assets import resolve_symbol
 from jevloop.limits import Limits
 from jevloop.risk import check, kill_check
 
+from fakes import AlwaysBuyClient, FakeAlpaca
+
 L = Limits()
 
 FLAT = dict(
@@ -87,94 +89,6 @@ def test_kill_dominates_a_plain_veto():
 # -- the loop actually stops -------------------------------------------
 
 
-class _FakeAlpaca:
-    """Minimal stand-in for AlpacaPaperClient: a flat book, and it accepts
-    every order so inventory climbs until the position cap trips."""
-
-    def __init__(self, spec):
-        self.spec = spec
-        self.symbol = spec.symbol
-        self.base_url = "https://paper-api.alpaca.markets"
-        self.is_live = False
-        self.orders = []
-
-    def is_market_open(self):
-        return True
-
-    def get_orderbook(self):
-        return {
-            "b": [{"p": 100.0 - i, "s": 5.0} for i in range(3)],
-            "a": [{"p": 101.0 + i, "s": 5.0} for i in range(3)],
-        }
-
-    def get_latest_trade(self):
-        return {"p": 100.5, "s": 1.0}
-
-    def get_recent_trades(self, limit=100):
-        return [{"p": 100.5, "s": 0.1, "tks": "B"} for _ in range(30)]
-
-    def submit_limit_order(self, side, qty, limit_price, tif="gtc"):
-        self.orders.append(("limit", side, qty))
-        return {"id": "x"}
-
-    def submit_market_order(self, side, qty):
-        self.orders.append(("market", side, qty))
-        return {"id": "x"}
-
-    def cancel_all_orders(self):
-        pass
-
-
-class _AlwaysBuyClient:
-    """A decision client with no randomness: always a confident quote
-    environment and a confident "up" call, so the directional leg fires
-    every tick and inventory climbs deterministically. Keeps this test
-    about the kill path, not about what the mock's RNG felt like doing."""
-
-    name = "STUB"
-    model = "stub-deterministic"
-
-    def ask(self, state, questions, timeout):
-        answers = {
-            "regime": {
-                "type": "choice",
-                "choice": "trending",
-                "probabilities": {"trending": 0.9, "mean_reverting": 0.1},
-                "confidence": 0.9,
-            },
-            "direction": {
-                "type": "choice",
-                "choice": "up",
-                "probabilities": {"up": 0.9, "down": 0.05, "neutral": 0.05},
-                "confidence": 0.9,
-            },
-            "toxic_flow": {"type": "noul", "noul": 0.1},
-            "liquidity_stressed": {"type": "noul", "noul": 0.1},
-            "quote_environment": {
-                "type": "score",
-                "score": 2.8,
-                "legend": {"0": "a", "1": "b", "2": "c", "3": "d"},
-                "probabilities": {"0": 0.0, "1": 0.05, "2": 0.1, "3": 0.85},
-                "confidence": 0.95,
-            },
-            "inventory_pressure": {
-                "type": "score",
-                "score": 0.2,
-                "legend": {"0": "a", "1": "b", "2": "c", "3": "d"},
-                "probabilities": {"0": 0.8, "1": 0.1, "2": 0.05, "3": 0.05},
-                "confidence": 0.9,
-            },
-            "execution_health": {
-                "type": "score",
-                "score": 2.9,
-                "legend": {"0": "a", "1": "b", "2": "c", "3": "d"},
-                "probabilities": {"0": 0.0, "1": 0.0, "2": 0.1, "3": 0.9},
-                "confidence": 0.95,
-            },
-        }
-        return answers, {"route": self.name, "model": self.model, "latency_ms": 12.0}
-
-
 def test_position_breach_stops_the_loop_instead_of_looping_forever(
     tmp_path, monkeypatch
 ):
@@ -194,12 +108,12 @@ def test_position_breach_stops_the_loop_instead_of_looping_forever(
     monkeypatch.setattr(loopmod, "LATEST_FILE", tmp_path / "latest.json")
 
     spec = resolve_symbol("BTC/USD")
-    fake = _FakeAlpaca(spec)
+    fake = FakeAlpaca(spec)
     monkeypatch.setattr(
         loopmod, "client_from_env", lambda symbol, live, confirmation: fake
     )
     monkeypatch.setattr(
-        loopmod, "resolve_decision_client", lambda mock: _AlwaysBuyClient()
+        loopmod, "resolve_decision_client", lambda mock: AlwaysBuyClient()
     )
 
     limits = Limits()
@@ -240,7 +154,7 @@ def test_api_error_streak_can_actually_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(loopmod, "LATEST_FILE", tmp_path / "latest.json")
 
     spec = resolve_symbol("BTC/USD")
-    fake = _FakeAlpaca(spec)
+    fake = FakeAlpaca(spec)
 
     attempts = {"n": 0}
 

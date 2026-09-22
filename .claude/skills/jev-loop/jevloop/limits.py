@@ -59,3 +59,10 @@ class Limits:
     max_alpaca_calls_per_minute: int = (
         90  # stays under Alpaca's free-tier data/trading limits
     )
+    # How often to re-read the broker's own position and overwrite local
+    # bookkeeping with it. Not every tick, on purpose: a tick already
+    # spends 3 data calls, and at tick_seconds=2.0 that is 90/min, the
+    # whole budget above. Every 10th tick adds ~3 calls/min. A sync also
+    # happens at startup and after any fill, which are the moments the
+    # local number is most likely to be wrong.
+    position_sync_ticks: int = 10

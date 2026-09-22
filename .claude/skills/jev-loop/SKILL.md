@@ -102,9 +102,9 @@ never raise them, only add more caution on top.
 | `jevloop/client.py` | Resolves the decision client: Vercel AI Gateway (the normal route) or a direct TypeSafe key (a faster optional extra) or a mock, prints which one won, pins and logs the model per response. |
 | `jevloop/policy.py` | `compose_action()`, code, not Jev, turns seven answers into KILL / PULL_QUOTES / WIDEN / QUOTE_BOTH_SIDES / QUOTE_WIDE / STAND_DOWN using strategy.py's thresholds, plus a directional leg, then hands the result to strategy.py's hook. |
 | `jevloop/pricing.py` | Avellaneda-Stoikov reservation price and half spread. |
-| `jevloop/risk.py` | Nine hard limits, checked before every order, never delegated. |
-| `jevloop/ladder.py` | The five-rung fallback ladder (RUN / REDUCE / HOLD_LATE / RULES_ONLY / KILL). |
-| `jevloop/execution/alpaca.py` | Alpaca execution, crypto or equities. Paper by default; live trading exists only behind the three-gate opt-in (see Live trading below). Refuses to place an equity order while the market is closed. |
+| `jevloop/risk.py` | Nine hard limits, checked before every order, never delegated. The five kill-class ones (`kill_check`) are also evaluated before the ladder, so a breach stops the loop instead of just refusing orders. |
+| `jevloop/ladder.py` | The five-rung fallback ladder (RUN / REDUCE / HOLD_LATE / RULES_ONLY / KILL). A KILL cancels resting orders and closes the position at the venue, then verifies it before reporting flat. |
+| `jevloop/execution/alpaca.py` | Alpaca execution, crypto or equities, plus the position endpoints (`get_position`, `close_position`) a real KILL needs. Paper by default; live trading exists only behind the three-gate opt-in (see Live trading below). Refuses to place an equity order while the market is closed. |
 | `jevloop/loop.py` | The nine-stage block loop, one JSON line per tick to `~/.jev-loop/log.jsonl` and `~/.jev-loop/latest.json`. Supports `--forever` / `--ticks 0` with a clean shutdown that cancels resting orders. |
 | `jevloop/calibrate.py` | Brier score + 10-bin reliability table from the log; `reliability.png` if matplotlib is present. |
 | `jevloop/serve.py` | Tiny static server for `dashboard/index.html` and `dashboard/wall.html`. |

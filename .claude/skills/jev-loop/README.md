@@ -116,6 +116,14 @@ a switch made deliberately awkward so it only ever happens on purpose.
   instead -- change a number, restart, see different behaviour.
 - The risk engine (`jevloop/risk.py`) never calls Jev and never delegates,
   and runs after `strategy.py`'s hook has had its say, not before.
+- Inventory is the broker's number, not the loop's guess. The position is
+  re-read from Alpaca at startup, every `position_sync_ticks` ticks, and
+  after any fill, so a resting quote that filled or a restart into an
+  open position cannot leave the dollar limits policing a fiction.
+- A KILL cancels resting orders and closes the position at the venue,
+  then re-reads the position to confirm. If the close fails, or the venue
+  still shows a position, the loop says so loudly and keeps the real
+  number rather than reporting flat on faith.
 - This is not investment advice and it does not claim a profit. It is a
   scaffold for a decision battery, a policy engine, and a risk layer around
   a fast model. Edge is still your job, and it lives in `strategy.py`.
