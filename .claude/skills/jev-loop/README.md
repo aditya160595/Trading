@@ -60,7 +60,14 @@ strategy pulled out of thin air, wired in only so a demo run shows real
 fills. `jevloop/strategy.py` owns the seven tunable thresholds behind
 `compose_action()` and an `apply_strategy()` hook that gets one last
 look at every action before it goes near an order, free to change or
-veto it. The shipped default matches exactly what the video ran.
+veto it. Every threshold ships at the value the video ran. The hook
+ships with a single guard: it drops a directional leg that would grow an
+already-pressured position, since the leg is the only thing in this loop
+that moves inventory and nothing else reduces it. Without it, a
+persistently one-sided direction call walks the position into
+`max_position_usd` and the loop kills and stops. It only ever removes a
+leg, never adds one; raise `inventory_pressure_leg_veto_score` above 3.0
+to turn it off.
 
 ## The nine-stage loop
 

@@ -79,16 +79,21 @@ it owns the seven tunable thresholds `compose_action()` reads (when to
 pull quotes, widen, quote both sides or wide, and how confident Jev has
 to be before a directional leg is taken), plus an `apply_strategy()` hook
 called on every tick with the action already chosen, free to change it
-or veto it outright. The shipped default matches exactly what the video
-ran: change nothing here and nothing changes. The hard risk caps stay
-separate, in `jevloop/limits.py`, and a strategy can never raise them,
-only add more caution on top.
+or veto it outright. Every threshold ships at the value the video ran.
+The hook ships with one guard: it drops a directional leg that would
+grow an already-pressured position, because the leg is the only thing
+here that moves inventory and nothing else reduces it -- left
+unchecked, a one-sided direction call walks the position into
+`max_position_usd` in a few fills and kills the loop. Raise
+`inventory_pressure_leg_veto_score` above 3.0 to disable it. The hard
+risk caps stay separate, in `jevloop/limits.py`, and a strategy can
+never raise them, only add more caution on top.
 
 ## What each file does
 
 | File | Job |
 |---|---|
-| `jevloop/strategy.py` | The file you edit: the seven tunable thresholds behind `compose_action()`, plus the `apply_strategy()` hook to override or veto an action. Shipped default changes nothing. |
+| `jevloop/strategy.py` | The file you edit: the tunable thresholds behind `compose_action()`, plus the `apply_strategy()` hook to override or veto an action. Ships with one inventory guard; otherwise a pass-through. |
 | `jevloop/limits.py` | The hard risk caps and operational numbers. Never overridable by a strategy. |
 | `jevloop/assets.py` | Resolves any symbol into a spec: endpoints, notional floor, precision, shorting, market hours. |
 | `jevloop/state.py` | Deterministic state snapshot, under ~400 tokens, strict timestamp discipline, session VWAP, honest depth degradation. |

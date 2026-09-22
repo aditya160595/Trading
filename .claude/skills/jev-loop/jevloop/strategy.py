@@ -16,14 +16,17 @@ Two things live here:
 
 2. `apply_strategy()`, a hook called once per tick with the action
    `compose_action()` already produced from the thresholds above. Return
-   it unchanged (the default) and nothing changes from what shipped in
-   the video. Return a different action to override it, or an action
-   with `kind=STAND_DOWN` to veto the tick outright. This is the one
-   function a real strategy plugs into.
+   a different action to override it, or an action with
+   `kind=STAND_DOWN` to veto the tick outright. This is the one function
+   a real strategy plugs into. It ships with a single inventory guard,
+   described on the function itself.
 
-Shipped default: every threshold below matches what the video ran, and
-`apply_strategy()` is a no-op. Nothing changes for someone who never
-opens this file.
+Shipped default: every threshold below matches what the video ran.
+`apply_strategy()` ships with exactly one guard -- it drops a directional
+leg that would grow an already-pressured position -- and is otherwise a
+pass-through. That guard only ever makes the loop more conservative, and
+it can be disabled by raising `inventory_pressure_leg_veto_score` above
+3.0 or by returning `action` unchanged.
 
 The hard risk caps (max position, max daily loss, max drawdown, and so
 on) do NOT live here: they live in `jevloop/limits.py`, checked in
@@ -57,6 +60,13 @@ class StrategyThresholds:
         0.55  # direction.confidence above this -> take the leg
     )
 
+    # Inventory guard (see apply_strategy below). Jev's inventory_pressure
+    # score runs 0 "None" .. 3 "Reduce now"; at or above this, a leg that
+    # would GROW the open position is dropped. Raise it toward 3.0 to let
+    # inventory run further, or set it above 3.0 to disable the guard and
+    # restore the original no-op behaviour.
+    inventory_pressure_leg_veto_score: float = 2.0  # "Skew hard" or worse
+
 
 THRESHOLDS = StrategyThresholds()
 
@@ -65,21 +75,53 @@ def apply_strategy(action, answers: dict, snapshot: dict, limits) -> object:
     """The strategy hook. Called once per tick, after compose_action() has
     already turned Jev's answers into an action using THRESHOLDS above.
 
-    Default: return the action unchanged. That is the whole strategy the
-    video ran, a generic one, pulled out of thin air, applied only so the
-    demo shows real fills.
+    Shipped behaviour: one guard, and otherwise the action is returned
+    untouched. The guard drops the directional leg when Jev says inventory
+    pressure has reached `inventory_pressure_leg_veto_score` AND the leg
+    would grow the position rather than cut it. Quoting is unaffected --
+    only the leg is dropped.
 
-    To plug in your own strategy, edit this function. You can:
+    Why it exists: the directional leg is the only thing in this loop that
+    moves inventory, and nothing else ever reduces it. A persistently
+    one-sided direction call (exactly what a trending regime produces)
+    walks the position into `max_position_usd` in a handful of fills, and
+    that is a KILL: the loop flattens and stops. Jev is already answering
+    "how urgent is it to cut this position" every tick; this listens to
+    that answer instead of discarding it, so the risk cap stays an
+    emergency backstop rather than a scheduled event.
+
+    This makes the loop MORE conservative, never less: it only ever
+    removes a leg, never adds or enlarges one. risk.py still runs after
+    this and still holds the final veto.
+
+    To customise, edit this function. You can:
       - inspect `answers` (the seven Jev judgments this tick) or
         `snapshot` (the deterministic state) and return a different
         Action than the one compose_action() chose
       - veto the tick outright by returning
         `Action(STAND_DOWN, reason="my strategy said no")`
-      - leave `action` alone most of the time and only step in on
-        specific conditions
-
-    `risk.py` still runs after this and still has the final veto, so
-    nothing returned here can bypass a hard limit in limits.py, only add
-    more caution on top of it.
+      - drop the guard entirely by returning `action` unchanged, which
+        restores the behaviour this file originally shipped with
     """
+    if action.direction_leg is None:
+        return action
+
+    pressure = (answers.get("inventory_pressure") or {}).get("score")
+    if pressure is None or pressure < THRESHOLDS.inventory_pressure_leg_veto_score:
+        return action
+
+    inventory = snapshot.get("inventory", 0.0)
+    if not inventory:
+        # Pressure to cut a position you do not hold is not a reason to
+        # refuse to open one.
+        return action
+
+    grows_position = (action.direction_leg == "up" and inventory > 0) or (
+        action.direction_leg == "down" and inventory < 0
+    )
+    if grows_position:
+        action.direction_leg = None
+        action.reason = (
+            f"{action.reason}; leg dropped, inventory pressure {pressure:.1f}"
+        )
     return action
