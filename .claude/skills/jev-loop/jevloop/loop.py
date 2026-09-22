@@ -71,6 +71,7 @@ from .risk import kill_check
 from .state import (
     InventoryState,
     build_snapshot,
+    infer_position_opened_at,
     reconcile_position,
     record_fill_slippage,
     update_vwap,
@@ -500,18 +501,51 @@ def run(
 
 def _sync_position(alpaca, inv, as_of: float, where: str) -> str:
     """Overwrite local inventory with the broker's, and say so when the two
-    disagreed. Returns a line to print, or "" when nothing moved."""
+    disagreed. Returns a line to print, or "" when nothing moved.
+
+    When a position is adopted that this process did not open, the open
+    time is reconstructed from filled order history so `max_inventory_age_s`
+    measures the real age rather than the time since the loop noticed.
+    That costs one extra call, and only on adoption, not per tick.
+    """
     position = alpaca.get_position()
-    before, after = reconcile_position(inv, position, as_of)
-    if before == after:
+
+    opened_at = None
+    age_note = ""
+    adopting = position and (inv.inventory == 0 or inv.position_opened_at is None)
+    if adopting:
+        try:
+            qty = float(position.get("qty", 0.0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty:
+            try:
+                opened_at = infer_position_opened_at(qty, alpaca.get_filled_orders())
+            except AlpacaAPIError as exc:
+                opened_at = None
+                age_note = f"; order history unavailable ({exc})"
+            if opened_at is None and not age_note:
+                age_note = (
+                    "; could not determine when it was opened from order history, "
+                    "so its age is measured from now and max_inventory_age_s is "
+                    "generous by however long it was already held"
+                )
+            elif opened_at is not None:
+                age_note = f"; opened {as_of - opened_at:.0f}s ago per order history"
+
+    before, after = reconcile_position(inv, position, as_of, opened_at=opened_at)
+
+    if before == after and not age_note:
         return (
             f"position sync ({where}): flat, as expected"
             if where == "startup" and after == 0
             else ""
         )
+    if before == after:
+        return f"position sync ({where}): holding {after:g}{age_note}"
     return (
         f"position sync ({where}): local inventory {before:g} corrected to "
-        f"{after:g} from the broker"
+        f"{after:g} from the broker{age_note}"
     )
 
 

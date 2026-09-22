@@ -96,7 +96,7 @@ never raise them, only add more caution on top.
 | `jevloop/strategy.py` | The file you edit: the tunable thresholds behind `compose_action()`, plus the `apply_strategy()` hook to override or veto an action. Ships with one inventory guard; otherwise a pass-through. |
 | `jevloop/limits.py` | The hard risk caps and operational numbers. Never overridable by a strategy. |
 | `jevloop/assets.py` | Resolves any symbol into a spec: endpoints, notional floor, precision, shorting, market hours. |
-| `jevloop/state.py` | Deterministic state snapshot, under ~400 tokens, strict timestamp discipline, session VWAP, honest depth degradation. |
+| `jevloop/state.py` | Deterministic state snapshot, under ~400 tokens, strict timestamp discipline, session VWAP, honest depth degradation. Also reconciles inventory with the broker and reconstructs when a position was opened from filled order history. |
 | `jevloop/split.py` | The allow-list of battery questions and the guard that refuses any question that looks like arithmetic. |
 | `jevloop/battery.py` | The seven-question Jev battery (regime, direction, toxic flow, liquidity stress, quote environment, inventory pressure, execution health). |
 | `jevloop/client.py` | Resolves the decision client: Vercel AI Gateway (the normal route) or a direct TypeSafe key (a faster optional extra) or a mock, prints which one won, pins and logs the model per response. |

@@ -4,9 +4,24 @@ The venue fake holds a real position: orders move it, get_position()
 reports it, and close_position() clears it. That matters because the loop
 now reconciles its own bookkeeping against the broker every few ticks --
 a fake that always claimed flat would let a reconciliation bug pass.
+
+It also keeps filled-order history, newest first, because the loop
+reconstructs when a position was opened from exactly that. seed_position()
+plants a position with a chosen open time, which is how a restart into an
+existing position gets tested.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+
+def _iso(ts: float) -> str:
+    return (
+        datetime.fromtimestamp(ts, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 class FakeAlpaca:
@@ -22,6 +37,7 @@ class FakeAlpaca:
         self.closes = 0
         self.position_qty = 0.0
         self.entry_price = entry_price
+        self.fills: list[dict] = []  # newest first, as Alpaca returns them
 
     # -- market data ----------------------------------------------------
     def is_market_open(self) -> bool:
@@ -51,9 +67,34 @@ class FakeAlpaca:
     def close_position(self):
         if not self.position_qty:
             return None
+        self._record_fill(
+            "sell" if self.position_qty > 0 else "buy", abs(self.position_qty)
+        )
         self.position_qty = 0.0
         self.closes += 1
         return {"id": "close-order"}
+
+    def get_filled_orders(self, limit: int = 500) -> list:
+        return self.fills[:limit]
+
+    # -- test helpers ---------------------------------------------------
+    def _record_fill(self, side: str, qty: float, at: float | None = None) -> None:
+        self.fills.insert(
+            0,
+            {
+                "side": side,
+                "filled_qty": str(qty),
+                "status": "filled",
+                "filled_at": _iso(at if at is not None else datetime.now(timezone.utc).timestamp()),
+            },
+        )
+
+    def seed_position(self, qty: float, opened_seconds_ago: float = 0.0) -> None:
+        """Plant a position the loop did not open, with a real open time in
+        the order history -- the restart case."""
+        opened_at = datetime.now(timezone.utc).timestamp() - opened_seconds_ago
+        self.position_qty = qty
+        self._record_fill("buy" if qty > 0 else "sell", abs(qty), at=opened_at)
 
     # -- orders ---------------------------------------------------------
     def submit_limit_order(self, side, qty, limit_price, tif="gtc"):
@@ -63,6 +104,7 @@ class FakeAlpaca:
     def submit_market_order(self, side, qty):
         self.orders.append(("market", side, qty))
         self.position_qty += qty if side == "buy" else -qty
+        self._record_fill(side, qty)
         return {"id": f"fake-{len(self.orders)}"}
 
     def cancel_all_orders(self):

@@ -120,6 +120,13 @@ a switch made deliberately awkward so it only ever happens on purpose.
   re-read from Alpaca at startup, every `position_sync_ticks` ticks, and
   after any fill, so a resting quote that filled or a restart into an
   open position cannot leave the dollar limits policing a fiction.
+- A position the loop did not open still has a real age. Alpaca's
+  position payload does not say when it was opened, so the loop walks
+  filled order history backwards to find the fill that opened it, and
+  `max_inventory_age_s` measures from there rather than from the moment
+  the loop noticed. When history cannot reach back far enough, the loop
+  says so on the sync line instead of letting the age limit quietly go
+  soft.
 - A KILL cancels resting orders and closes the position at the venue,
   then re-reads the position to confirm. If the close fails, or the venue
   still shows a position, the loop says so loudly and keeps the real

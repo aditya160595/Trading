@@ -148,7 +148,8 @@ def test_startup_adopts_a_pre_existing_position(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(loopmod, "LATEST_FILE", tmp_path / "latest.json")
 
     fake = FakeAlpaca(BTC)
-    fake.position_qty = 0.4  # already holding when the loop starts
+    # Already holding when the loop starts, opened 20 minutes ago.
+    fake.seed_position(0.4, opened_seconds_ago=1200)
     monkeypatch.setattr(
         loopmod, "client_from_env", lambda symbol, live, confirmation: fake
     )

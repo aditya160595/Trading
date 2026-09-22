@@ -266,6 +266,32 @@ class AlpacaPaperClient:
             f"{urllib.parse.quote(self.symbol, safe='')}"
         )
 
+    def get_filled_orders(self, limit: int = 500) -> list:
+        """This symbol's filled orders, newest first.
+
+        Used to work out when the current position was actually opened,
+        which Alpaca's position payload does not say. Called only when a
+        position is adopted that this process did not open, not per tick.
+        """
+        orders = self._request(
+            "GET",
+            f"{self.base_url}/v2/orders",
+            params={
+                "status": "closed",
+                "symbols": self.symbol,
+                "limit": limit,
+                "direction": "desc",
+                "nested": "false",
+            },
+        )
+        if not isinstance(orders, list):
+            return []
+        return [
+            o
+            for o in orders
+            if o.get("status") == "filled" and o.get("filled_at")
+        ]
+
     def get_position(self) -> dict | None:
         """The broker's own view of the position, or None when flat.
 

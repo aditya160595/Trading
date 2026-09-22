@@ -116,8 +116,79 @@ def record_fill_slippage(
     inv.recent_slippage_bps = inv.recent_slippage_bps[-10:]
 
 
+def _parse_timestamp(value) -> float | None:
+    """RFC3339 -> epoch seconds. Alpaca sometimes reports nanosecond
+    precision, which fromisoformat refuses, so the fractional part is
+    truncated to microseconds before parsing."""
+    import re
+    from datetime import datetime
+
+    if not value:
+        return None
+    text = str(value).replace("Z", "+00:00")
+    text = re.sub(r"\.(\d{6})\d+", r".\1", text)
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def infer_position_opened_at(
+    position_qty: float,
+    fills: list[dict],
+    tolerance: float = 1e-9,
+) -> float | None:
+    """When did the current unbroken position actually start?
+
+    Alpaca's position payload says what you hold, never since when, so a
+    loop adopting a position it did not open has no age for it -- and
+    `max_inventory_age_s` is an age limit. Measuring from first sight
+    makes that limit silently generous by however long the position was
+    already held, which on a restart is exactly when you least want it
+    to be.
+
+    `fills` is the symbol's filled orders, NEWEST FIRST. Walk backwards,
+    undoing each fill from the current position; the fill that takes the
+    running total to zero, or flips it through zero, is the one that
+    opened the position from flat. Its timestamp is the answer.
+
+    Returns None when the history runs out before reaching zero: the
+    position is older than the orders we can see, and saying "unknown"
+    beats inventing a number that weakens a risk limit.
+    """
+    if not position_qty:
+        return None
+
+    original_sign = 1.0 if position_qty > 0 else -1.0
+    remaining = float(position_qty)
+
+    for order in fills:
+        try:
+            qty = float(order.get("filled_qty") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+
+        signed = qty if order.get("side") == "buy" else -qty
+        remaining -= signed
+
+        crossed = abs(remaining) <= tolerance or (
+            remaining * original_sign < 0
+        )
+        if crossed:
+            # This fill opened the position we are holding now, either
+            # from flat or by flipping the previous one through flat.
+            return _parse_timestamp(order.get("filled_at"))
+
+    return None
+
+
 def reconcile_position(
-    inv: InventoryState, position: dict | None, as_of: float
+    inv: InventoryState,
+    position: dict | None,
+    as_of: float,
+    opened_at: float | None = None,
 ) -> tuple[float, float]:
     """Overwrite the loop's own inventory bookkeeping with the broker's.
 
@@ -128,9 +199,11 @@ def reconcile_position(
     on the position actually held. This is the correction: Alpaca's
     answer wins, always.
 
-    `position` is Alpaca's position payload, or None when flat. Returns
-    (previous_inventory, new_inventory) so the caller can report a
-    correction rather than silently swallowing one.
+    `position` is Alpaca's position payload, or None when flat.
+    `opened_at`, when known, is when the position was actually opened --
+    see infer_position_opened_at(). Returns (previous_inventory,
+    new_inventory) so the caller can report a correction rather than
+    silently swallowing one.
     """
     previous = inv.inventory
 
@@ -148,11 +221,13 @@ def reconcile_position(
     if qty == 0:
         inv.position_opened_at = None
     elif previous == 0 or inv.position_opened_at is None:
-        # First sight of this position. Alpaca does not report when it was
-        # opened, so age is measured from now: on a restart into an
-        # existing position, max_inventory_age_s is therefore generous by
-        # however long it was already held. Documented, not silent.
-        inv.position_opened_at = as_of
+        # First sight of this position. Alpaca's payload does not say when
+        # it was opened, so the caller reconstructs that from filled order
+        # history and passes it here. Only when the history cannot reach
+        # back far enough does this fall back to now -- and the caller
+        # says so out loud rather than letting an age limit quietly go
+        # soft.
+        inv.position_opened_at = opened_at if opened_at is not None else as_of
 
     return previous, inv.inventory
 
